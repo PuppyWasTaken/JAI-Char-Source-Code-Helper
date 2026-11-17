@@ -1,0 +1,91 @@
+.jsh-toolbar {
+  display: flex !important;
+  align-items: center !important;
+  flex-wrap: wrap !important;
+  gap: 8px !important;
+  margin: 0 0 10px !important;
+  font: 12px/1.5 system-ui, sans-serif !important;
+}
+
+.jsh-toolbar .jsh-button {
+  appearance: none !important;
+  border: 1px solid #72649d !important;
+  border-radius: 6px !important;
+  padding: 6px 11px !important;
+  background: #514075 !important;
+  color: #fff !important;
+  font: 600 12px/1.5 system-ui, sans-serif !important;
+  cursor: pointer !important;
+}
+
+.jsh-toolbar .jsh-secondary { background: #292735 !important; }
+.jsh-toolbar .jsh-button:hover:not(:disabled) { background: #68538e !important; }
+.jsh-toolbar .jsh-button:focus-visible { outline: 2px solid #d6c5ff !important; outline-offset: 2px !important; }
+.jsh-toolbar .jsh-button:disabled { opacity: .45 !important; cursor: default !important; }
+.jsh-status { color: #c9c3d8 !important; }
+
+.jsh-native-textarea { display: none !important; }
+
+.jsh-editor.CodeMirror {
+  box-sizing: border-box !important;
+  width: 100% !important;
+  min-width: 0 !important;
+  min-height: 180px !important;
+  max-width: 100% !important;
+  resize: vertical !important;
+  overflow: hidden !important;
+  border: 1px solid #625a75 !important;
+  border-radius: 8px !important;
+  background: #19171f !important;
+  color: #eeeaf5 !important;
+  color-scheme: dark;
+  font: 14px/22px Consolas, "Cascadia Code", "Liberation Mono", monospace !important;
+  letter-spacing: 0 !important;
+  text-align: left !important;
+}
+
+.jsh-editor:focus-within { border-color: #b49ade !important; }
+.jsh-editor .CodeMirror-lines { padding: 10px 0 !important; }
+.jsh-editor pre.CodeMirror-line,
+.jsh-editor pre.CodeMirror-line-like {
+  padding: 0 12px !important;
+  background: transparent !important;
+  color: inherit;
+  font: inherit !important;
+}
+.jsh-editor.CodeMirror-wrap pre.CodeMirror-line {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+.jsh-editor .CodeMirror-gutters {
+  border-right: 1px solid #393342 !important;
+  background: #221f2b !important;
+}
+.jsh-editor .CodeMirror-linenumber {
+  color: #a69cb9 !important;
+  padding: 0 10px 0 8px !important;
+}
+.jsh-editor .CodeMirror-cursor { border-left: 2px solid #f5efff !important; }
+.jsh-editor .CodeMirror-selected { background: #41344f !important; }
+.jsh-editor.CodeMirror-focused .CodeMirror-selected { background: #514063 !important; }
+.jsh-editor .cm-tag { color: #f38ca8 !important; }
+.jsh-editor .cm-bracket { color: #a9b6d8 !important; }
+.jsh-editor .cm-attribute { color: #f3ca87 !important; }
+.jsh-editor .cm-string,
+.jsh-editor .cm-string-2 { color: #a7dba0 !important; }
+.jsh-editor .cm-comment { color: #9993a6 !important; font-style: italic; }
+.jsh-editor .cm-keyword,
+.jsh-editor .cm-atom { color: #c7a2f2 !important; }
+.jsh-editor .cm-number { color: #f4ae80 !important; }
+.jsh-editor .cm-property { color: #96c9f0 !important; }
+.jsh-editor .cm-def,
+.jsh-editor .cm-variable { color: #eeeaf5 !important; }
+.jsh-editor .cm-variable-2,
+.jsh-editor .cm-variable-3,
+.jsh-editor .cm-type { color: #83d4c7 !important; }
+.jsh-editor .cm-operator,
+.jsh-editor .cm-meta,
+.jsh-editor .cm-qualifier,
+.jsh-editor .cm-builtin { color: #c7a2f2 !important; }
+.jsh-editor .cm-error { text-decoration: underline wavy #f38ca8; }

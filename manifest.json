@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Puppy's JAI SourceCode Helper",
+  "version": "1.1.0",
+  "description": "Wrapped lines, HTML syntax highlighting, line numbers, and formatting in JanitorAI's Edit Character source code popup.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://janitorai.com/*", "https://*.janitorai.com/*"],
+      "css": ["vendor/codemirror/lib/codemirror.css", "editor.css"],
+      "js": [
+        "vendor/beautify.js",
+        "vendor/beautify-css.js",
+        "vendor/beautify-html.js",
+        "vendor/codemirror/lib/codemirror.js",
+        "vendor/codemirror/mode/xml/xml.js",
+        "vendor/codemirror/mode/javascript/javascript.js",
+        "vendor/codemirror/mode/css/css.js",
+        "vendor/codemirror/mode/htmlmixed/htmlmixed.js",
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
