@@ -41,5 +41,7 @@ The **Personality** and **Scenario** fields open with Markdown preview on by def
 
 `vendor/purify.min.js`: DOMPurify **3.4.18**, dual licensed under Apache-2.0 or MPL-2.0. License information is in `vendor/dompurify-LICENSE` and `vendor/dompurify-LICENSE-MPL`. Markdown parsing and sanitizing both run locally, with no CDN at runtime.
 
+`vendor/turndown.js`: Turndown **7.2.5**, and `vendor/turndown-plugin-gfm.js`: turndown-plugin-gfm **1.0.2**, both MIT licensed. Licenses are included in `vendor/turndown-LICENSE` and `vendor/turndown-plugin-gfm-LICENSE`. These bundled libraries convert rich-text edits back into Markdown locally.
+
 ## Disclaimer 
 Extension heavily assisted by GPT Sol 6.1, I do not take credit. Icon image generated on Tensor.art 
