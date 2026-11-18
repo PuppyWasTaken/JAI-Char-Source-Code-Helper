@@ -45,7 +45,10 @@
       headingStyle: "atx",
       bulletListMarker: "-",
       codeBlockStyle: "fenced",
-      emDelimiter: "*"
+      emDelimiter: "*",
+      // Marked already renders soft newlines as breaks. Do not add hard-break
+      // escapes/spaces when serializing contenteditable's <br> elements.
+      br: ""
     });
     toMarkdown.use(turndownPluginGfm.gfm);
     toMarkdown.addRule("previewImages", {
@@ -66,7 +69,7 @@
     const hint = document.createElement("span");
     hint.className = "jsh-markdown-hint";
     hint.id = `jsh-markdown-hint-${++previewId}`;
-    hint.textContent = "Edit directly below · Markdown formatting may be normalized";
+    hint.textContent = "Type Markdown to format · Start bullets with - or * then Space";
     const status = document.createElement("span");
     status.className = "jsh-status";
     status.setAttribute("role", "status");
@@ -92,6 +95,13 @@
     let syncedHTML = "";
     let syncingFromPreview = false;
     let composing = false;
+    let applyingInputRule = false;
+    let insertingPlainText = false;
+    let completedInlineCode = null;
+    let lastEnter = null;
+    let formatExitId = 0;
+    const formatExitHistory = [];
+    const pendingBlockNodes = new Set();
     const locked = () => textarea.disabled || textarea.readOnly;
     const updateEmpty = () => {
       preview.dataset.empty = String(!preview.textContent && !preview.querySelector("hr, input, table"));
@@ -126,6 +136,10 @@
           input.disabled = true;
         }
         preview.replaceChildren(fragment);
+        completedInlineCode = null;
+        lastEnter = null;
+        formatExitHistory.length = 0;
+        pendingBlockNodes.clear();
         updateEmpty();
         syncedHTML = preview.innerHTML;
         renderedValue = textarea.value;
@@ -185,13 +199,448 @@
         return false;
       }
     };
+    // Keep DOM positions for logical lines: Chromium uses paragraphs/divs for
+    // Enter and <br> for Shift+Enter, sometimes in the same editable field.
+    const editableLines = () => {
+      const lines = [];
+      let line = null;
+      const point = (node, offset) => ({ node, offset });
+      const begin = position => { line ||= { start: position, end: position, text: "" }; };
+      const end = position => {
+        if (!line) return;
+        line.end = position;
+        lines.push(line);
+        line = null;
+      };
+      const walk = node => {
+        if (node.nodeType === Node.TEXT_NODE) {
+          // Ignore Marked's whitespace between rendered block elements.
+          if (node.parentNode === preview && /^\n+$/.test(node.textContent)) return;
+          for (let offset = 0; offset < node.length; offset++) {
+            begin(point(node, offset));
+            if (node.data[offset] === "\n") end(point(node, offset));
+            else {
+              line.text += node.data[offset].replace(/\u00a0/g, " ");
+              line.end = point(node, offset + 1);
+            }
+          }
+          return;
+        }
+        if (node.nodeType !== Node.ELEMENT_NODE) return;
+        const index = () => Array.prototype.indexOf.call(node.parentNode.childNodes, node);
+        if (node.nodeName === "BR") {
+          begin(point(node.parentNode, index()));
+          // The final <br> on an empty browser line is a caret placeholder.
+          if (!node.nextSibling && !line.text) return;
+          end(point(node.parentNode, index()));
+          begin(point(node.parentNode, index() + 1));
+          return;
+        }
+        const block = node !== preview && /^(P|DIV|H[1-6]|BLOCKQUOTE|LI|UL|OL|PRE)$/.test(node.nodeName);
+        if (block) {
+          end(point(node.parentNode, index()));
+          if (!node.querySelector("p, div, h1, h2, h3, h4, h5, h6, blockquote, li, ul, ol, pre")) {
+            begin(point(node, 0));
+          }
+        }
+        for (const child of node.childNodes) walk(child);
+        if (block) end(point(node, node.childNodes.length));
+      };
+      walk(preview);
+      end(point(preview, preview.childNodes.length));
+      return lines;
+    };
+    const lineRange = (first, last = first) => {
+      const range = document.createRange();
+      range.setStart(first.start.node, first.start.offset);
+      range.setEnd(last.end.node, last.end.offset);
+      return range;
+    };
+    const applyBlockRules = trigger => {
+      if (!showing || locked() || composing) return false;
+      const selection = window.getSelection();
+      if (!selection?.rangeCount || !selection.isCollapsed || !preview.contains(selection.anchorNode)) return false;
+      const caret = selection.getRangeAt(0).cloneRange();
+      const element = caret.startContainer.nodeType === Node.ELEMENT_NODE ? caret.startContainer : caret.startContainer.parentElement;
+      const pre = element.closest("pre");
+      const commit = trigger === "commit" || trigger === "insertParagraph" || trigger === "insertLineBreak";
+      const replace = (range, fragment, restoreCaret = false) => {
+        const wrapper = document.createElement("div");
+        wrapper.append(fragment);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        const changed = document.execCommand("insertHTML", false, wrapper.innerHTML);
+        if (changed && restoreCaret && caret.startContainer.isConnected) {
+          selection.removeAllRanges();
+          selection.addRange(caret);
+        }
+        return changed;
+      };
+      if (pre) {
+        if (!commit) return false;
+        const remaining = caret.cloneRange();
+        remaining.setEnd(pre, pre.childNodes.length);
+        if (remaining.toString().trim()) return false;
+        const text = codeText(pre);
+        const closing = /(?:^|\n) {0,3}(?:`{3,}|~{3,})[ \t]*\n*$/.exec(text);
+        if (!closing) return false;
+        const fragment = document.createDocumentFragment();
+        const savedPre = pre.cloneNode(false);
+        const code = pre.querySelector("code")?.cloneNode(false) || document.createElement("code");
+        code.textContent = text.slice(0, closing.index);
+        savedPre.append(code);
+        const paragraph = document.createElement("p");
+        paragraph.append(document.createElement("br"));
+        fragment.append(savedPre, paragraph);
+        const closingLine = editableLines().filter(line =>
+          pre.contains(line.start.node) && /^ {0,3}(?:`{3,}|~{3,})[ \t]*$/.test(line.text)
+        ).pop();
+        if (closingLine) {
+          // Enter leaves an extra empty caret line inside <pre>. Remove it
+          // before formatBlock, otherwise Chromium keeps a nested <pre> shell.
+          const trailing = document.createRange();
+          trailing.setStart(closingLine.end.node, closingLine.end.offset);
+          trailing.setEnd(pre, pre.childNodes.length);
+          selection.removeAllRanges();
+          selection.addRange(trailing);
+          document.execCommand("delete");
+        }
+        const range = document.createRange();
+        range.selectNode(pre);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        // Chromium retains an enclosing <pre> when replacing its contents.
+        // Leave that editing context first, using an undoable native command.
+        document.execCommand("formatBlock", false, "div");
+        return replace(selection.getRangeAt(0).cloneRange(), fragment);
+      }
+      if (element.closest("code, a, li, blockquote, h1, h2, h3, h4, h5, h6")) return false;
+      // Ordinary typing only needs a line scan for indentation or a completed
+      // backtick fence. Check the whole logical line below before converting.
+      if (!commit && (caret.startContainer.nodeType !== Node.TEXT_NODE ||
+          !/^(?:[ \u00a0]{4}|\t)|`{3}$/.test(caret.startContainer.data.slice(0, caret.startOffset)))) return false;
+      const lines = editableLines();
+      let index = lines.findIndex(line => lineRange(line).isPointInRange(caret.startContainer, caret.startOffset));
+      if (index < 0) return false;
+      // Enter has already created the next line; commit the line just finished.
+      const entered = trigger === "insertParagraph" || trigger === "insertLineBreak";
+      const current = index;
+      if (entered) index--;
+      if (index < 0) return false;
+      const line = lines[index];
+      const context = line.start.node.nodeType === Node.ELEMENT_NODE ? line.start.node : line.start.node.parentElement;
+      if (context.closest("pre, code, a, li, blockquote, h1, h2, h3, h4, h5, h6")) return false;
+      const previous = lines[index - 1];
+      if (commit && previous?.text.trim() && /^ {0,3}(?:={2,}|-{2,})[ \t]*$/.test(line.text)) {
+        const titleContext = previous.start.node.nodeType === Node.ELEMENT_NODE ? previous.start.node : previous.start.node.parentElement;
+        if (titleContext.closest("pre, li, blockquote, h1, h2, h3, h4, h5, h6")) return false;
+        const heading = document.createElement(line.text.trim().startsWith("=") ? "h1" : "h2");
+        const title = lineRange(previous).cloneContents();
+        // Preserve rich-text edits in the title, not just its textContent.
+        heading.append(title.querySelector("*") ? title : sanitize(markdown.parseInline(previous.text)));
+        const fragment = document.createDocumentFragment();
+        fragment.append(heading);
+        return replace(lineRange(previous, line), fragment, entered);
+      }
+      const fence = /^ {0,3}(`{3,}|~{3,})([^`]*)$/.exec(line.text);
+      const indent = /^(?: {4}|\t)/.exec(line.text);
+      const prefix = lineRange(line);
+      prefix.setEnd(caret.startContainer, caret.startOffset);
+      const immediateFence = fence && /^ {0,3}`{3}$/.test(line.text) &&
+        prefix.toString().replace(/\u00a0/g, " ") === line.text;
+      if (!(fence && (commit || immediateFence)) && !indent) return false;
+      const fragment = document.createDocumentFragment();
+      const newPre = document.createElement("pre");
+      const code = document.createElement("code");
+      if (fence) {
+        const language = fence[2].trim().split(/\s+/)[0];
+        if (language) code.className = `language-${language}`;
+        code.textContent = "\n";
+      } else code.textContent = line.text.slice(indent[0].length) || "\n";
+      newPre.append(code);
+      fragment.append(newPre);
+      const existing = new Set(preview.querySelectorAll("pre"));
+      const changed = replace(lineRange(line, entered && !lines[current].text ? lines[current] : line), fragment);
+      if (changed) {
+        const inserted = Array.from(preview.querySelectorAll("pre")).find(node => !existing.has(node));
+        const text = inserted?.querySelector("code")?.firstChild;
+        if (text) selection.collapse(text, code.textContent === "\n" ? 0 : text.length);
+      }
+      return changed;
+    };
+    const commitBlockRules = () => {
+      // Switching modes must also commit a just-typed underline/fence when the
+      // user has since clicked elsewhere. Only inspect edited text nodes: never
+      // reinterpret literal Markdown that was already present when we opened.
+      const selection = window.getSelection();
+      for (const node of pendingBlockNodes) {
+        if (!node.isConnected || !preview.contains(node) || node.parentElement.closest("pre, code, a")) continue;
+        const line = editableLines().find(candidate =>
+          /^ {0,3}(?:={2,}|-{2,}|`{3,}[^`]*|~{3,}.*)[ \t]*$/.test(candidate.text) &&
+          lineRange(candidate).intersectsNode(node)
+        );
+        if (!line) continue;
+        selection.collapse(line.end.node, line.end.offset);
+        applyBlockRules("commit");
+      }
+      pendingBlockNodes.clear();
+    };
+    const applyInputRules = (trigger = "insertText") => {
+      if (!showing || locked() || composing) return;
+      if (applyBlockRules(trigger)) return;
+      const selection = window.getSelection();
+      if (!selection?.rangeCount || !selection.isCollapsed ||
+          !preview.contains(selection.anchorNode)) return;
+      const caret = selection.getRangeAt(0);
+      const element = caret.startContainer.nodeType === Node.ELEMENT_NODE ?
+        caret.startContainer : caret.startContainer.parentElement;
+      // Code and links are literal editing contexts, not Markdown shortcuts.
+      if (element.closest("pre, code, a")) return;
+      const block = element.closest("p, div, li, h1, h2, h3, h4, h5, h6");
+      if (!block || (block !== preview && !preview.contains(block))) return;
+      const prefix = caret.cloneRange();
+      prefix.setStart(block, 0);
+      const prefixContent = prefix.cloneContents();
+      const text = prefix.toString().replace(/\u00a0/g, " ");
+      // Only recognize block shortcuts on an otherwise plain first line.
+      const marker = !prefixContent.querySelector("br, p, div, li, pre") &&
+        /^(?:([-+*]) |(1)[.)] |(#{1,6}) |(>) )$/.exec(text);
+      if (marker && !element.closest("li") &&
+          !/^H[1-6]$/.test(block.nodeName) &&
+          !(marker[4] && element.closest("blockquote"))) {
+        selection.removeAllRanges();
+        selection.addRange(prefix);
+        document.execCommand("delete");
+        if (marker[1]) document.execCommand("insertUnorderedList");
+        else if (marker[2]) document.execCommand("insertOrderedList");
+        else document.execCommand("formatBlock", false, marker[3] ? `h${marker[3].length}` : "blockquote");
+        return;
+      }
+      // Parse only the text node immediately before the caret, never the entire
+      // preview. Existing formatting, other blocks, and the caret stay intact.
+      if (caret.startContainer.nodeType !== Node.TEXT_NODE) return;
+      const typed = caret.startContainer.textContent.slice(0, caret.startOffset);
+      // Most inline shortcuts commit on Space. Single-backtick code spans also
+      // commit immediately on their closing backtick, without adding a space.
+      const spaced = /[ \u00a0]$/.test(typed);
+      if (!spaced && !typed.endsWith("`")) return;
+      const source = spaced ? typed.slice(0, -1) : typed;
+      const tokens = marked.Lexer.lexInline(source, { gfm: true });
+      const token = tokens[tokens.length - 1];
+      if (!token || !["strong", "em", "del", "codespan", "link"].includes(token.type)) return;
+      if (!spaced && (token.type !== "codespan" || !/^`[^`]+`$/.test(token.raw))) return;
+      if (token.type === "link" && !token.raw.startsWith("[")) return;
+      const start = source.length - token.raw.length;
+      // Do not reinterpret an escaped shortcut or a partial delimiter run.
+      if (start && /[*_`~\\]/.test(source[start - 1])) return;
+      const fragment = sanitize(markdown.parseInline(token.raw));
+      if (!fragment.firstElementChild) return;
+      for (const link of fragment.querySelectorAll("a")) {
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+      }
+      const wrapper = document.createElement("div");
+      wrapper.append(fragment);
+      if (spaced) wrapper.append(document.createTextNode("\u00a0"));
+      const replacement = caret.cloneRange();
+      replacement.setStart(caret.startContainer, start);
+      selection.removeAllRanges();
+      selection.addRange(replacement);
+      const existingCode = !spaced && new Set(preview.querySelectorAll("code"));
+      document.execCommand("insertHTML", false, wrapper.innerHTML);
+      if (!spaced) {
+        const code = Array.from(preview.querySelectorAll("code")).find(node => !existingCode.has(node));
+        if (code) {
+          completedInlineCode = { code, text: code.textContent, caret: selection.getRangeAt(0).cloneRange() };
+        }
+      }
+    };
+    const leaveCompletedInlineCode = () => {
+      const completed = completedInlineCode;
+      completedInlineCode = null;
+      if (!completed?.code.isConnected || !preview.contains(completed.code)) return;
+      const selection = window.getSelection();
+      if (!selection?.rangeCount || !selection.isCollapsed || !completed.code.contains(selection.anchorNode) ||
+          !completed.code.textContent.startsWith(completed.text)) return;
+      // Chromium otherwise inherits <code> when typing just after its closing
+      // delimiter. Move only the newly typed suffix out, using undoable edits;
+      // no invisible caret markers or extra spaces are stored in the document.
+      const suffix = completed.code.textContent.slice(completed.text.length);
+      if (!suffix) return;
+      const range = completed.caret.cloneRange();
+      range.setEnd(selection.anchorNode, selection.anchorOffset);
+      if (range.toString() !== suffix) return;
+      selection.removeAllRanges();
+      selection.addRange(range);
+      document.execCommand("delete");
+      range.setStartAfter(completed.code);
+      range.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      const plain = document.createElement("span");
+      plain.textContent = suffix.replace(/ /g, "\u00a0");
+      document.execCommand("insertHTML", false, plain.outerHTML);
+    };
+    const exitFormatting = () => {
+      const selection = window.getSelection();
+      if (!showing || locked() || composing || !selection?.rangeCount ||
+          !selection.isCollapsed || !preview.contains(selection.anchorNode)) return false;
+      const states = [preview.innerHTML];
+      let commandCount = 0;
+      const command = (name, value) => {
+        commandCount++;
+        const changed = document.execCommand(name, false, value);
+        const html = preview.innerHTML;
+        if (html !== states[states.length - 1]) states.push(html);
+        return changed;
+      };
+      const caret = selection.getRangeAt(0).cloneRange();
+      const element = caret.startContainer.nodeType === Node.ELEMENT_NODE ? caret.startContainer : caret.startContainer.parentElement;
+      const formatted = element.closest("pre, code, ul, ol, li, blockquote, h1, h2, h3, h4, h5, h6, strong, b, em, i, del, s, strike, a, sup, sub, span, table, details, summary");
+      if (formatted && preview.contains(formatted)) {
+        let root = formatted;
+        while (root.parentNode !== preview) root = root.parentNode;
+        const before = caret.cloneRange();
+        before.setStart(root, 0);
+        const after = caret.cloneRange();
+        after.setEnd(root, root.childNodes.length);
+        const prefix = root.cloneNode(false);
+        prefix.append(before.cloneContents());
+        const suffix = root.cloneNode(false);
+        suffix.append(after.cloneContents());
+        const meaningful = node => !!node.textContent.trim() || !!node.querySelector?.("hr, input, table, img");
+        const trim = (node, end) => {
+          for (let child = end ? node.lastChild : node.firstChild; child; child = end ? node.lastChild : node.firstChild) {
+            if (child.nodeType === Node.TEXT_NODE) {
+              child.textContent = end ? child.textContent.replace(/\n[\s\u00a0]*$/, "") : child.textContent.replace(/^[\s\u00a0]*\n/, "");
+              if (child.textContent.trim()) break;
+            } else {
+              trim(child, end);
+              if (meaningful(child)) break;
+            }
+            child.remove();
+          }
+        };
+        trim(prefix, true);
+        trim(suffix, false);
+        const fragment = document.createElement("div");
+        if (meaningful(prefix)) fragment.append(prefix);
+        const paragraph = document.createElement("p");
+        const marker = `jsh-format-exit-${previewId}-${++formatExitId}`;
+        paragraph.className = `jsh-plain-paragraph ${marker}`;
+        paragraph.append(document.createElement("br"));
+        fragment.append(paragraph);
+        if (meaningful(suffix)) fragment.append(suffix);
+        // Preserve code text, including internal blank lines, on either side
+        // of a split. Only the empty Enter lines at the split are discarded.
+        for (const pre of fragment.querySelectorAll("pre")) {
+          const code = pre.querySelector("code")?.cloneNode(false) || document.createElement("code");
+          code.textContent = codeText(pre);
+          pre.replaceChildren(code);
+        }
+        const depth = root.querySelectorAll("ul, ol, blockquote").length +
+          Number(root.matches("ul, ol, blockquote"));
+        const range = document.createRange();
+        range.selectNodeContents(root);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        // Empty the editing context before leaving it. formatBlock on a
+        // populated multiline <pre> can otherwise absorb neighboring blocks.
+        command("delete");
+        for (let index = 0; index < depth; index++) command("outdent");
+        command("formatBlock", "p");
+        command("removeFormat");
+        command("insertHTML", fragment.innerHTML);
+        const inserted = preview.querySelector(`.${marker}`);
+        if (inserted) selection.collapse(inserted, 0);
+      } else {
+        command("formatBlock", "p");
+      }
+      // Clear browser typing state as well as element-level formatting.
+      command("removeFormat");
+      for (const name of ["bold", "italic", "strikeThrough", "subscript", "superscript"]) {
+        if (document.queryCommandState(name)) command(name);
+      }
+      if (states.length > 2) {
+        formatExitHistory.push({ states, commandCount, undoHTML: null });
+        if (formatExitHistory.length > 25) formatExitHistory.shift();
+      }
+      completedInlineCode = null;
+      return true;
+    };
+    const finishFormatExitHistory = trigger => {
+      if (trigger !== "historyUndo" && trigger !== "historyRedo") return;
+      const undo = trigger === "historyUndo";
+      // syncedHTML is the document immediately before the browser's first
+      // undo/redo command. Match that boundary, not intermediate DOM shapes:
+      // Chromium can normalize empty wrappers while replaying its history.
+      const entry = [...formatExitHistory].reverse().find(item =>
+        syncedHTML === (undo ? item.states[item.states.length - 1] : item.undoHTML)
+      );
+      if (!entry) return;
+      const states = entry.states;
+      // Treat the native commands used by Double Enter as one undo/redo step,
+      // never exposing the temporary emptied block or syncing it to the site.
+      const target = undo ? states[0] : states[states.length - 1];
+      for (let index = 0; index < entry.commandCount + 2 && preview.innerHTML !== target; index++) {
+        if (!document.execCommand(undo ? "undo" : "redo")) break;
+      }
+      if (undo) entry.undoHTML = preview.innerHTML;
+    };
+    const finishInput = (format, trigger = "insertText") => {
+      // Run after the browser's edit command returns, so our undoable commands
+      // are not rejected as recursive execCommand calls (also used by paste).
+      queueMicrotask(() => {
+        if (composing) return;
+        applyingInputRule = true;
+        try {
+          finishFormatExitHistory(trigger);
+          const paragraph = format && trigger === "insertParagraph";
+          const doubleEnter = paragraph && lastEnter;
+          lastEnter = null;
+          if (doubleEnter && exitFormatting()) return;
+          if (completedInlineCode) {
+            if (format && trigger === "insertText") leaveCompletedInlineCode();
+            else completedInlineCode = null;
+          }
+          if (format) applyInputRules(trigger);
+          if (paragraph && showing && !locked()) {
+            const selection = window.getSelection();
+            if (selection?.isCollapsed && preview.contains(selection.anchorNode)) {
+              lastEnter = { node: selection.anchorNode, offset: selection.anchorOffset };
+            }
+          }
+        } finally {
+          applyingInputRule = false;
+          syncPreview();
+        }
+      });
+    };
     preview.addEventListener("input", event => {
-      if (!event.isComposing) syncPreview();
+      if (!applyingInputRule && !insertingPlainText &&
+          ["insertText", "insertCompositionText"].includes(event.inputType)) {
+        const node = window.getSelection()?.anchorNode;
+        if (node?.nodeType === Node.TEXT_NODE && preview.contains(node)) pendingBlockNodes.add(node);
+      }
+      if (!event.isComposing && !composing && !applyingInputRule) {
+        finishInput(!insertingPlainText && ["insertText", "insertParagraph", "insertLineBreak"].includes(event.inputType), event.inputType);
+      }
     });
-    preview.addEventListener("compositionstart", () => { composing = true; });
-    preview.addEventListener("compositionend", () => { composing = false; syncPreview(); });
-    preview.addEventListener("blur", syncPreview);
+    preview.addEventListener("compositionstart", () => { lastEnter = null; composing = true; });
+    preview.addEventListener("compositionend", () => { composing = false; finishInput(true); });
+    preview.addEventListener("keydown", event => {
+      if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) lastEnter = null;
+    });
+    preview.addEventListener("beforeinput", event => {
+      if (!lastEnter || applyingInputRule) return;
+      const selection = window.getSelection();
+      if (event.inputType !== "insertParagraph" || !selection?.isCollapsed ||
+          selection.anchorNode !== lastEnter.node || selection.anchorOffset !== lastEnter.offset) lastEnter = null;
+    });
+    preview.addEventListener("pointerdown", () => { lastEnter = null; });
+    preview.addEventListener("blur", () => { lastEnter = null; syncPreview(); });
     const insertPlainText = text => {
+      lastEnter = null;
       if (locked() || !showing || !text) return;
       preview.focus();
       const selection = window.getSelection();
@@ -199,7 +648,14 @@
           !preview.contains(selection.focusNode)) return;
       // insertText retains native undo/redo in Chrome. The Range fallback also
       // inserts only text, never clipboard HTML or remote images.
-      if (!document.execCommand?.("insertText", false, text)) {
+      insertingPlainText = true;
+      let inserted;
+      try {
+        inserted = document.execCommand?.("insertText", false, text);
+      } finally {
+        insertingPlainText = false;
+      }
+      if (!inserted) {
         const range = selection.getRangeAt(0);
         const fragment = document.createDocumentFragment();
         text.replace(/\r\n?/g, "\n").split("\n").forEach((line, index) => {
@@ -233,6 +689,12 @@
     });
     const setPreview = active => {
       if (active === showing) return;
+      lastEnter = null;
+      if (!active && !locked() && !composing) {
+        applyingInputRule = true;
+        try { commitBlockRules(); }
+        finally { applyingInputRule = false; }
+      }
       if (!active && !syncPreview()) return;
       if (active) {
         textareaScroll = textarea.scrollTop;

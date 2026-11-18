@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Puppy's JAI SourceCode Helper",
-  "version": "1.3.0",
+  "version": "2.0.0",
   "description": "HTML source editing tools and editable Markdown previews for JanitorAI's Personality and Scenario fields.",
   "icons": {
     "16": "icons/icon16.png",
