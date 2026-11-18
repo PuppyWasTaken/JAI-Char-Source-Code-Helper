@@ -2,6 +2,18 @@
   "use strict";
 
   const editors = new Map();
+  const markdownPreviews = new Map();
+  const markdownSelector = 'textarea#personality, textarea#scenario';
+  const markdownRenderer = new marked.Renderer();
+  // Images become links so opening a preview never contacts external servers.
+  markdownRenderer.image = ({ href, text }) => {
+    const link = document.createElement("a");
+    link.setAttribute("href", href);
+    link.textContent = text ? `Image: ${text}` : "View image";
+    return link.outerHTML;
+  };
+  const markdown = new marked.Marked({ gfm: true, breaks: true, renderer: markdownRenderer });
+  let previewId = 0;
   const options = {
     indent_size: 2,
     indent_char: " ",
@@ -21,6 +33,112 @@
     setter.call(textarea, value);
     textarea.dispatchEvent(new Event("input", { bubbles: true }));
     textarea.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  function enhanceMarkdown(textarea) {
+    const label = textarea.id === "personality" ? "Personality" : "Scenario";
+    const toolbar = document.createElement("div");
+    toolbar.className = "jsh-toolbar jsh-markdown-toolbar";
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "jsh-button jsh-secondary";
+    toggle.textContent = "Preview";
+    toggle.setAttribute("aria-label", `Preview ${label} Markdown`);
+    toggle.setAttribute("aria-pressed", "false");
+    toolbar.append(toggle);
+
+    const preview = document.createElement("div");
+    preview.id = `jsh-markdown-preview-${++previewId}`;
+    preview.className = "jsh-markdown-preview";
+    preview.hidden = true;
+    preview.tabIndex = 0;
+    preview.setAttribute("role", "region");
+    preview.setAttribute("aria-label", `${label} Markdown preview`);
+    toggle.setAttribute("aria-controls", preview.id);
+    textarea.before(toolbar);
+    textarea.after(preview);
+
+    let showing = false;
+    let renderedValue = null;
+    let textareaScroll = 0;
+    const update = () => {
+      if (!showing || renderedValue === textarea.value) return;
+      try {
+        // An explicit allowlist excludes scripts, CSS, embedded content, images,
+        // and other elements that could affect the page or make network requests.
+        const fragment = DOMPurify.sanitize(markdown.parse(textarea.value), {
+          RETURN_DOM_FRAGMENT: true,
+          ALLOWED_TAGS: ["p", "br", "hr", "h1", "h2", "h3", "h4", "h5", "h6",
+            "strong", "b", "em", "i", "del", "s", "ul", "ol", "li", "blockquote",
+            "pre", "code", "a", "table", "thead", "tbody", "tr", "th", "td",
+            "input", "sup", "sub", "details", "summary"],
+          ALLOWED_ATTR: ["href", "title", "class", "start", "align", "type", "checked", "disabled"],
+          ALLOW_DATA_ATTR: false,
+          ALLOW_ARIA_ATTR: false
+        });
+        for (const link of fragment.querySelectorAll("a")) {
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+        }
+        for (const input of fragment.querySelectorAll("input")) {
+          input.type = "checkbox";
+          input.disabled = true;
+        }
+        preview.replaceChildren(fragment);
+        if (!preview.textContent.trim() && !preview.childElementCount) {
+          const empty = document.createElement("p");
+          empty.className = "jsh-markdown-empty";
+          empty.textContent = "Nothing to preview yet.";
+          preview.append(empty);
+        }
+        renderedValue = textarea.value;
+      } catch (error) {
+        preview.textContent = "Could not render this Markdown. Switch back to Edit to view your text.";
+        console.warn("JanitorAI Source Helper: Markdown preview failed", error);
+      }
+    };
+    const setPreview = active => {
+      if (active === showing) return;
+      if (active) {
+        textareaScroll = textarea.scrollTop;
+        preview.style.height = `${Math.max(97, textarea.getBoundingClientRect().height)}px`;
+      }
+      showing = active;
+      update();
+      textarea.classList.toggle("jsh-markdown-hidden", active);
+      preview.hidden = !active;
+      toggle.textContent = active ? "Edit" : "Preview";
+      toggle.setAttribute("aria-label", `${active ? "Edit" : "Preview"} ${label} Markdown`);
+      toggle.setAttribute("aria-pressed", String(active));
+      if (!active) textarea.scrollTop = textareaScroll;
+    };
+    toggle.addEventListener("click", () => {
+      setPreview(!showing);
+      if (!showing) textarea.focus();
+    });
+    // Required fields must be visible when the browser focuses an invalid field.
+    const onInvalid = () => setPreview(false);
+    const onReset = () => requestAnimationFrame(update);
+    const form = textarea.form;
+    textarea.addEventListener("input", update);
+    textarea.addEventListener("change", update);
+    textarea.addEventListener("invalid", onInvalid);
+    form?.addEventListener("reset", onReset);
+    markdownPreviews.set(textarea, {
+      toolbar,
+      preview,
+      update,
+      dispose() {
+        textarea.classList.remove("jsh-markdown-hidden");
+        textarea.removeEventListener("input", update);
+        textarea.removeEventListener("change", update);
+        textarea.removeEventListener("invalid", onInvalid);
+        form?.removeEventListener("reset", onReset);
+        toolbar.remove();
+        preview.remove();
+      }
+    });
+    setPreview(true);
   }
 
   function enhance(textarea) {
@@ -165,6 +283,20 @@
   }
 
   function scan() {
+    for (const [textarea, controller] of markdownPreviews) {
+      if (!textarea.isConnected || !textarea.matches(markdownSelector) ||
+          !controller.toolbar.isConnected || !controller.preview.isConnected ||
+          textarea.parentNode !== controller.preview.parentNode ||
+          textarea.parentNode !== controller.toolbar.parentNode) {
+        controller.dispose();
+        markdownPreviews.delete(textarea);
+      } else {
+        controller.update();
+      }
+    }
+    for (const textarea of document.querySelectorAll(markdownSelector)) {
+      if (!markdownPreviews.has(textarea)) enhanceMarkdown(textarea);
+    }
     for (const [textarea, editor] of editors) {
       if (!textarea.isConnected || !editor.wrapper.isConnected || !textarea.closest('[role="dialog"]')) {
         editor.dispose();
@@ -180,7 +312,8 @@
       if (!/edit\s+source\s+code/i.test(title)) continue;
       for (const textarea of dialog.querySelectorAll("textarea")) {
         // CodeMirror has its own hidden input textarea; never enhance that.
-        if (!textarea.closest(".CodeMirror") && !editors.has(textarea)) enhance(textarea);
+        if (!textarea.closest(".CodeMirror") && !textarea.matches(markdownSelector) &&
+            !editors.has(textarea)) enhance(textarea);
       }
     }
   }
@@ -189,7 +322,7 @@
   new MutationObserver(records => {
     // Ignore editor-internal rendering and status changes.
     const relevant = records.some(record =>
-      !record.target.closest?.(".jsh-toolbar, .jsh-editor")
+      !record.target.closest?.(".jsh-toolbar, .jsh-editor, .jsh-markdown-preview")
     );
     if (!relevant || pending) return;
     pending = true;
@@ -201,7 +334,7 @@
     childList: true,
     subtree: true,
     attributes: true,
-    attributeFilter: ["disabled", "readonly"]
+    attributeFilter: ["disabled", "readonly", "id"]
   });
   scan();
 })();
