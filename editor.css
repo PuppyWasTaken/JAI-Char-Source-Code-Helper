@@ -27,6 +27,8 @@
 .jsh-native-textarea { display: none !important; }
 
 .jsh-markdown-toolbar { justify-content: flex-end !important; margin: 0 0 6px !important; }
+.jsh-markdown-hint { flex: 1; color: var(--jn-text-300, #c9c3d8); }
+.jsh-markdown-hint[hidden] { display: none !important; }
 .jsh-markdown-hidden { display: none !important; }
 .jsh-markdown-preview[hidden] { display: none !important; }
 .jsh-markdown-preview {
@@ -51,6 +53,13 @@
   scrollbar-color: rgba(255, 255, 255, .18) transparent;
 }
 .jsh-markdown-preview:focus-visible { outline: 2px solid #d6c5ff; outline-offset: 2px; }
+.jsh-markdown-preview[contenteditable="true"] { cursor: text; }
+.jsh-markdown-preview[data-empty="true"]::before {
+  content: attr(data-placeholder);
+  color: var(--jn-text-300, #c9c3d8);
+  font-style: italic;
+  pointer-events: none;
+}
 .jsh-markdown-preview p,
 .jsh-markdown-preview ul,
 .jsh-markdown-preview ol,

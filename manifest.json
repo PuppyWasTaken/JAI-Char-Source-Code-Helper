@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Puppy's JAI SourceCode Helper",
-  "version": "1.2.0",
-  "description": "HTML source editing tools and Markdown previews for JanitorAI's Personality and Scenario fields.",
+  "version": "1.3.0",
+  "description": "HTML source editing tools and editable Markdown previews for JanitorAI's Personality and Scenario fields.",
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",
@@ -24,6 +24,8 @@
         "vendor/codemirror/mode/htmlmixed/htmlmixed.js",
         "vendor/marked.js",
         "vendor/purify.min.js",
+        "vendor/turndown.js",
+        "vendor/turndown-plugin-gfm.js",
         "content.js"
       ],
       "run_at": "document_idle"
